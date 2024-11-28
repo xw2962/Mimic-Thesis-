@@ -1,0 +1,77 @@
+---
+title: "Mimic Thesis"
+author: "Amy.Wu"
+date: "2024-11-27"
+output: html_document
+---
+
+```{r}
+## Set CRAN mirror
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+## Install required libraries if not already installed
+install.packages("dplyr")
+install.packages("readr")
+install.packages("ggplot2")
+install.packages("survival")
+install.packages("randomForest")
+install.packages("readr")
+
+## Load libraries
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(survival)
+library(randomForest)
+library(readr)
+
+```
+
+# Section 1:  Load Data from Local CSV Files
+```{r}
+# Load relevant tables into R
+patients <- read.csv("/Users/wuxiaoyu/Desktop/9419 Master's Essay/mimic-iv-3.1/hosp/patients.csv")
+icustays <- read.csv("/Users/wuxiaoyu/Desktop/9419 Master's Essay/mimic-iv-3.1/icu/icustays.csv")
+diagnoses_icd <- read.csv("/Users/wuxiaoyu/Desktop/9419 Master's Essay/mimic-iv-3.1/hosp/diagnoses_icd.csv")
+labevents <- read.csv("/Users/wuxiaoyu/Desktop/9419 Master's Essay/mimic-iv-3.1/hosp/labevents.csv")
+procedureevents <- read.csv("/Users/wuxiaoyu/Desktop/9419 Master's Essay/mimic-iv-3.1/icu/procedureevents.csv")
+microbiologyevents <- read.csv("/Users/wuxiaoyu/Desktop/9419 Master's Essay/mimic-iv-3.1/hosp/microbiologyevents.csv")
+```
+
+# Section 2: Define the Cohort
+
+
+```{r}
+# Identify Diabetic Patients
+
+## Filter for diabetes-related ICD codes (ICD-9: 250.xx, ICD-10: E08-E13)
+diabetes_codes <- diagnoses_icd %>%
+  filter(
+    str_starts(icd_code, "250") | # ICD-9
+    str_starts(icd_code, "E08") | # ICD-10
+    str_starts(icd_code, "E09") |
+    str_starts(icd_code, "E10") |
+    str_starts(icd_code, "E11") |
+    str_starts(icd_code, "E13")
+  ) %>%
+  select(subject_id) %>%
+  distinct()
+
+## View the first few diabetic patients
+head(diabetes_codes)
+
+# Extract ICU Stays
+
+## Filter ICU stays for diabetic patients
+diabetic_icu_stays <- icustays %>%
+  inner_join(diabetic_patients, by = "subject_id") %>%
+  select(subject_id, stay_id, los) # Keep only relevant columns
+
+## View the first few ICU stays
+head(diabetic_icu_stays)
+
+```
+# Section 3: Define Wound Healing Outcomes
+```{r}
+
+```

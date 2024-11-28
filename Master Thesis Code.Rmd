@@ -6,10 +6,10 @@ output: html_document
 ---
 
 ```{r}
-# Set CRAN mirror
+## Set CRAN mirror
 options(repos = c(CRAN = "https://cloud.r-project.org"))
 
-# Install required libraries if not already installed
+## Install required libraries if not already installed
 install.packages("dplyr")
 install.packages("readr")
 install.packages("ggplot2")
@@ -17,12 +17,11 @@ install.packages("survival")
 install.packages("randomForest")
 install.packages("readr")
 
-# Load libraries
+## Load libraries
 library(dplyr)
 library(readr)
 library(ggplot2)
 library(survival)
 library(randomForest)
 library(readr)
-
 ```
