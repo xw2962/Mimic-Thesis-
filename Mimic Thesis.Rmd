@@ -29,6 +29,8 @@ library(stringr)
 
 ```
 
+# Aim One: investigate the relationship between ICU stay duration and wound healing outcomes in diabetic patients, identifying key predictors of impaired healing;
+
 # Section 1:  Load Data from Local CSV Files
 ```{r}
 # Load relevant tables into R
