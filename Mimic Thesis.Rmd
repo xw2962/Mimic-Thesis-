@@ -2,7 +2,7 @@
 title: "Mimic Thesis"
 author: "Amy.Wu"
 date: "2024-11-27"
-output: html_document
+output: github_document
 ---
 
 ```{r}
