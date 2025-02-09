@@ -1,5 +1,5 @@
 ---
-title: "Mimic Thesis"
+title: "Amy Mimic Thesis"
 author: "Amy.Wu"
 date: "2024-11-27"
 output: github_document
