@@ -26,12 +26,11 @@ library(survival)
 library(randomForest)
 library(readr)
 library(stringr)
-
 ```
 
 # Aim One: investigate the relationship between ICU stay duration and wound healing outcomes in diabetic patients, identifying key predictors of impaired healing;
 
-# Section 1:  Load Data from Local CSV Files
+# Section 1: Load Data from Local CSV Files
 ```{r}
 # Load relevant tables into R
 patients <- read.csv("/Users/wuxiaoyu/Desktop/9419 Master's Essay/mimic-iv-3.1/hosp/patients.csv")
@@ -378,4 +377,46 @@ importance(rf_model)
 
 # Plot feature importance
 varImpPlot(rf_model)
+```
+# Section 10: Identifying Key Predictors of Impaired Healing
+```{r}
+# Check for the minimum and maximum values of the value column.
+icu_wound_data %>% 
+  summarise(
+    min_value = min(value, na.rm = TRUE),
+    max_value = max(value, na.rm = TRUE)
+  )
+# min_value: 0 max_value: 961
+# Create a binary outcome for impaired healing using a threshold of 100
+icu_wound_data <- icu_wound_data %>%
+  mutate(impaired_healing = ifelse(value >= 100, 1, 0))
+
+# Check the distribution of the new outcome variable
+table(icu_wound_data$impaired_healing)
+
+# Fit a logistic regression model to assess predictors of impaired healing
+logit_model <- glm(impaired_healing ~ los + prolonged_stay, 
+                   data = icu_wound_data, 
+                   family = binomial)
+
+# Display the summary of the model to review coefficient estimates and significance levels
+summary(logit_model)
+
+# Calculate odds ratios and 95% confidence intervals for the predictors
+exp_coef <- exp(coef(logit_model))
+conf_int <- exp(confint(logit_model))
+odds_ratios <- data.frame(Estimate = exp_coef, conf_int)
+print(odds_ratios)
+```
+# Section 11: Cox Proportional Hazards Model for Time to Healing
+```{r}
+# Ensure the survival library is loaded
+library(survival)
+
+# Fit the Cox proportional hazards model using healing time and event indicator (healed)
+cox_model <- coxph(Surv(healing_time, healed) ~ los + prolonged_stay, 
+                   data = icu_wound_data)
+
+# Summarize the Cox model to review hazard ratios (HR) and p-values
+summary(cox_model)
 ```
