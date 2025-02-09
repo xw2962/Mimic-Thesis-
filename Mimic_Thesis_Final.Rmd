@@ -223,31 +223,76 @@ head(wound_results)
 # Section 4: Combine Data into a Unified Dataset
 # -----------------------------------------------------------
 ```{r}
-icu_wound_data <- diabetic_icu_stays %>%
-  # Join wound-related lab results using subject_id and stay_id
-  left_join(wound_healing_labs, by = c("subject_id", "stay_id")) %>%
+# Ensure wound_healing_labs includes the full join keys
+wound_healing_labs <- labevents %>%
+  inner_join(icustays, by = c("subject_id", "hadm_id")) %>%
+  select(subject_id, hadm_id, stay_id, itemid, value, valuenum, flag) %>%
+  filter(itemid %in% infection_lab_items)  # infection_lab_items defined earlier
+
+# Ensure wound_procedures includes the full join keys
+wound_procedures <- procedureevents %>%
+  filter(itemid %in% wound_icd_codes) %>%  # wound_icd_codes defined from wound_icd_procedures
+  select(subject_id, hadm_id, stay_id, itemid, starttime, value)
+
+icu_wound_data <- diabetic_icu_stays %>%  # diabetic_icu_stays already contains subject_id, hadm_id, stay_id, los
+  # (A) Join Demographic Information (Covariates) from patients
+  left_join(
+    select(patients, subject_id, anchor_age, gender, anchor_year, anchor_year_group, dod),
+    by = "subject_id"
+  ) %>%
   
-  # Join wound-related procedures using subject_id and stay_id.
-  # Note: This join creates duplicate 'hadm_id' columns.
-  left_join(wound_procedures, by = c("subject_id", "stay_id")) %>%
+  # (B) Join ICU Unit Information (excludes 'los' to preserve the original column)
+  left_join(
+    select(icustays, subject_id, hadm_id, stay_id, first_careunit, last_careunit),
+    by = c("subject_id", "hadm_id", "stay_id")
+  ) %>%
   
-  # Restore the original hadm_id by renaming and dropping the duplicate.
-  # Here, we assume that 'hadm_id.x' (from diabetic_icu_stays) is the desired column.
-  rename(hadm_id = hadm_id.x) %>%
-  select(-hadm_id.y) %>%
+  # (C) Join Infection-Related Lab Results (Exposure/Outcome: Infection Marker Lab Values)
+  left_join(
+    wound_healing_labs,
+    by = c("subject_id", "hadm_id", "stay_id")
+  ) %>%
   
-  # Join wound-related microbiology results using subject_id and hadm_id.
-  left_join(wound_results, by = c("subject_id", "hadm_id")) %>%
+  # (D) Join Wound-Related Procedures (Exposure: Clinical Interventions)
+  left_join(
+    wound_procedures,
+    by = c("subject_id", "hadm_id", "stay_id"),
+    suffix = c("", ".proc")
+  ) %>%
   
-  # Create a flag for prolonged ICU stay (>7 days)
+  # (E) Join Wound Healing Outcomes (Outcome: Wound Test Results)
+  left_join(
+    wound_results,  # wound_results includes subject_id, hadm_id, test_name, comments, etc.
+    by = c("subject_id", "hadm_id")
+  ) %>%
+  
+  # (F) Join Comorbid Conditions (Covariate)
+  left_join(
+    diagnoses_icd %>%
+      filter(!(str_starts(icd_code, "250") |
+               str_starts(icd_code, "E08") |
+               str_starts(icd_code, "E09") |
+               str_starts(icd_code, "E10") |
+               str_starts(icd_code, "E11") |
+               str_starts(icd_code, "E13"))) %>%
+      group_by(subject_id, hadm_id) %>%
+      summarise(comorbidities = paste(unique(icd_code), collapse = "; "), .groups = "drop"),
+    by = c("subject_id", "hadm_id")
+  ) %>%
+  
+  # (G) Create Additional Outcome/Exposure Variables
   mutate(prolonged_stay = if_else(los > 7, 1, 0))
 
-# Check for any empty column names and replace them with a placeholder ("unknown")
+# Replace any empty column names with a placeholder ("unknown")
 icu_wound_data <- icu_wound_data %>%
   rename_with(~ if_else(. == "", "unknown", .))
 
 # Optionally, save the combined dataset to a CSV file
-write_csv(icu_wound_data, "icu_wound_data.csv")
+write_csv(icu_wound_data, "icu_wound_data_combined.csv")
+
+# Preview the final combined dataset
+head(icu_wound_data)
+
 ```
 
 # -----------------------------------------------------------
@@ -255,12 +300,13 @@ write_csv(icu_wound_data, "icu_wound_data.csv")
 # -----------------------------------------------------------
 ```{r}
 library(dplyr)
-# (A) Remove duplicate rows
+# (A) Remove Duplicate Rows
 icu_wound_data <- icu_wound_data %>%
   distinct()
 
-# (B) Consolidate and Clean Value Columns
-# Check for the existence of 'value.x' and 'value.y'. If they exist, convert and coalesce them.
+# (B) Consolidate and Clean 'value' Columns
+# If both 'value.x' and 'value.y' exist, convert them to numeric and coalesce;
+# otherwise, convert an existing 'value' column or create a placeholder.
 if (all(c("value.x", "value.y") %in% names(icu_wound_data))) {
   icu_wound_data <- icu_wound_data %>%
     mutate(across(c(value.x, value.y),
@@ -269,32 +315,25 @@ if (all(c("value.x", "value.y") %in% names(icu_wound_data))) {
                                        as.character(.))))) %>%
     mutate(value = coalesce(value.x, value.y))
 } else if ("value" %in% names(icu_wound_data)) {
-  # If there is already a column named "value", convert it to numeric
   icu_wound_data <- icu_wound_data %>%
     mutate(value = as.numeric(if_else(value %in% c("N/A", ""),
                                       NA_character_,
                                       as.character(value))))
 } else {
-  # If none of the expected value columns exist, create a placeholder column
-  warning("No value columns found in icu_wound_data. Creating a placeholder 'value' column as NA.")
+  warning("No 'value' columns found in icu_wound_data. Creating a placeholder 'value' column as NA.")
   icu_wound_data <- icu_wound_data %>%
     mutate(value = NA_real_)
 }
 
-# (C) Handle Missing Values in Critical Columns
-# Remove rows where 'value' or 'los' is missing.
+# (C) Remove Rows with Missing Critical Values ('value' or 'los')
 icu_wound_data <- icu_wound_data %>%
   filter(!is.na(value) & !is.na(los))
 
-# Optionally, impute any remaining missing 'value' with the mean (this might be redundant after filtering)
+# Optionally, Impute Any Remaining Missing 'value' Entries with the Mean
 icu_wound_data <- icu_wound_data %>%
   mutate(value = if_else(is.na(value), mean(value, na.rm = TRUE), value))
 
-# (D) Select only the necessary columns for further analysis
-icu_wound_data <- icu_wound_data %>%
-  select(subject_id, stay_id, los, value, test_name, org_name, prolonged_stay)
-
-# Verify the data structure and summary statistics
+# Verify the Data Structure, Summary, and a Preview of the Data
 str(icu_wound_data)
 summary(icu_wound_data)
 head(icu_wound_data)
@@ -581,4 +620,56 @@ print(paste("Patients excluded due to no evidence of wound-related complications
 #-----------------------------------------------------------
 final_sample_count <- wound_evidence_count  # or use filtered_patients if you don't further restrict
 print(paste("Final study sample size:", final_sample_count))
+```
+
+```{r}
+# Print the head of each dataset
+
+cat("Patients data:\n")
+print(head(patients))
+
+cat("\nICU Stays data:\n")
+print(head(icustays))
+
+cat("\nDiagnoses ICD data:\n")
+print(head(diagnoses_icd))
+
+cat("\nLab Events data:\n")
+print(head(labevents))
+
+cat("\nProcedure Events data:\n")
+print(head(procedureevents))
+
+cat("\nMicrobiology Events data:\n")
+print(head(microbiologyevents))
+
+cat("\nD Lab Items data:\n")
+print(head(d_labitems))
+
+cat("\nD ICD Procedures data:\n")
+print(head(d_icd_procedures))
+
+library(dplyr)
+library(tibble)
+
+# Create a named list of your datasets
+datasets <- list(
+  patients = patients,
+  icustays = icustays,
+  diagnoses_icd = diagnoses_icd,
+  labevents = labevents,
+  procedureevents = procedureevents,
+  microbiologyevents = microbiologyevents,
+  d_labitems = d_labitems,
+  d_icd_procedures = d_icd_procedures
+)
+
+# For each dataset, get a comma-separated string of column names
+head_names_table <- tibble(
+  File = names(datasets),
+  Column_Headers = sapply(datasets, function(df) paste(names(df), collapse = ", "))
+)
+
+# Print the summary table
+print(head_names_table)
 ```
