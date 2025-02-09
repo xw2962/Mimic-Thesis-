@@ -469,3 +469,116 @@ total_unique_patients <- patients %>%
 print(total_unique_patients)
 ```
 
+```{r}
+library(dplyr)
+library(stringr)
+
+#-----------------------------------------------------------
+# 1. Total Unique Patients Admitted to Both Hospital and ICU
+#-----------------------------------------------------------
+# Assuming 'patients' holds all hospital admissions and 'icustays' holds ICU admissions,
+# we get the intersection of subject IDs in both datasets.
+total_hosp_ids <- unique(patients$subject_id)
+total_icu_ids  <- unique(icustays$subject_id)
+total_unique_patients <- length(intersect(total_hosp_ids, total_icu_ids))
+print(paste("Total unique patients (hospital & ICU):", total_unique_patients))
+
+#-----------------------------------------------------------
+# 2. Adult Patients (Aged ≥18 Years)
+#-----------------------------------------------------------
+adult_patients <- patients %>%
+  filter(anchor_age >= 18) %>%
+  select(subject_id, anchor_age) %>%
+  distinct()
+adult_patient_count <- nrow(adult_patients)
+print(paste("Adult patients (>= 18 years):", adult_patient_count))
+
+#-----------------------------------------------------------
+# 3. Diabetic Patients Based on ICD Codes (All Admissions)
+#-----------------------------------------------------------
+# Here we extract diabetic admissions from the diagnoses_icd table.
+# Note: This assumes a column "subject_id" is available in diagnoses_icd.
+diabetic_patients_all <- diagnoses_icd %>%
+  filter(str_starts(icd_code, "250") |   # ICD-9: 250.xx
+         str_starts(icd_code, "E08") |   # ICD-10: E08
+         str_starts(icd_code, "E09") |
+         str_starts(icd_code, "E10") |
+         str_starts(icd_code, "E11") |
+         str_starts(icd_code, "E13")) %>%
+  select(subject_id) %>%   # If subject_id exists here
+  distinct()
+diabetic_patient_count <- nrow(diabetic_patients_all)
+print(paste("Diabetic patients (documented diagnosis):", diabetic_patient_count))
+
+#-----------------------------------------------------------
+# 4. Diabetic Patients with ICU Stays (LOS ≥ 12 hours)
+#-----------------------------------------------------------
+# This step merges diabetic patients with ICU stays (and filters for LOS ≥ 0.5 days)
+diabetic_patients_icustays <- diagnoses_icd %>%
+  filter(str_starts(icd_code, "250") |  
+         str_starts(icd_code, "E08") |
+         str_starts(icd_code, "E09") |
+         str_starts(icd_code, "E10") |
+         str_starts(icd_code, "E11") |
+         str_starts(icd_code, "E13")) %>%
+  select(hadm_id) %>% 
+  distinct()
+
+diabetic_icu_stays <- icustays %>%
+  inner_join(diabetic_patients_icustays, by = "hadm_id") %>% 
+  filter(los >= 0.5) %>%      # ≥12 hours (0.5 days)
+  select(subject_id, hadm_id, stay_id, los) %>%
+  distinct()
+diabetic_icu_stays_count <- nrow(diabetic_icu_stays)
+print(paste("Diabetic ICU stays (LOS >= 12 hours):", diabetic_icu_stays_count))
+
+#-----------------------------------------------------------
+# 5. Exclusions Due to Incomplete Data or Inconsistent Admission Timestamps
+#-----------------------------------------------------------
+# For example, if you have a column indicating missing key demographic data,
+# you can compute the number excluded. Here we assume that diabetic_icu_stays had some
+# missing or inconsistent records that were later removed.
+# (In the code below, filtered_patients is the post-exclusion dataset.)
+
+filtered_patients <- diabetic_icu_stays %>%
+  left_join(
+    procedureevents %>%
+      filter(itemid %in% (d_icd_procedures %>%
+                            filter(str_detect(long_title, regex("wound|ulcer|debridement|dressing|skin|abscess",
+                                                                   ignore_case = TRUE))) %>%
+                            select(icd_code) %>%
+                            distinct() %>%
+                            pull(icd_code))),
+    by = "hadm_id") %>%
+  left_join(
+    labevents %>%
+      filter(itemid %in% (d_labitems %>%
+                            filter(str_detect(label, regex("infection|WBC|CRP|sepsis|culture", ignore_case = TRUE))) %>%
+                            select(itemid) %>%
+                            distinct() %>%
+                            pull(itemid))),
+    by = "hadm_id") %>%
+  filter(!is.na(los)) %>%
+  distinct()
+
+excluded_incomplete <- diabetic_icu_stays_count - nrow(filtered_patients)
+print(paste("Patients excluded due to incomplete data/inconsistent timestamps:", excluded_incomplete))
+
+#-----------------------------------------------------------
+# 6. Exclusions Due to Lack of Wound-Related Complications
+#-----------------------------------------------------------
+# If you further require evidence of wound-related complications (i.e., either a wound-related
+# procedure or infection-related lab marker must be present), then compute:
+wound_evidence <- filtered_patients %>%
+  filter(!is.na(starttime) | !is.na(valuenum))
+  # Adjust based on which columns indicate wound evidence
+wound_evidence_count <- nrow(wound_evidence)
+excluded_wound <- nrow(filtered_patients) - wound_evidence_count
+print(paste("Patients excluded due to no evidence of wound-related complications:", excluded_wound))
+
+#-----------------------------------------------------------
+# 7. Final Study Sample
+#-----------------------------------------------------------
+final_sample_count <- wound_evidence_count  # or use filtered_patients if you don't further restrict
+print(paste("Final study sample size:", final_sample_count))
+```
