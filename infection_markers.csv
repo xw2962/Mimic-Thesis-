@@ -1,10 +1,10 @@
-"itemid","label"
-50886,"Blood Culture Hold"
-51300,"WBC Count"
-51516,"WBC"
-51517,"WBC Casts"
-51518,"WBC Clumps"
-51652,"High-Sensitivity CRP"
-52219,"WBCScat"
-52220,"wbcp"
-52407,"WBC"
+itemid,label
+50886,Blood Culture Hold
+51300,WBC Count
+51516,WBC
+51517,WBC Casts
+51518,WBC Clumps
+51652,High-Sensitivity CRP
+52219,WBCScat
+52220,wbcp
+52407,WBC

@@ -1,0 +1,422 @@
+---
+title: "Mimic Thesis"
+author: "Amy.Wu"
+date: "2024-11-27"
+output: github_document
+---
+
+```{r}
+## Set CRAN mirror
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+## Install required libraries if not already installed
+install.packages("dplyr")
+install.packages("readr")
+install.packages("ggplot2")
+install.packages("survival")
+install.packages("randomForest")
+install.packages("readr")
+install.packages("stringr")
+
+## Load libraries
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(survival)
+library(randomForest)
+library(readr)
+library(stringr)
+```
+
+# Aim One: investigate the relationship between ICU stay duration and wound healing outcomes in diabetic patients, identifying key predictors of impaired healing;
+
+# Section 1: Load Data from Local CSV Files
+```{r}
+# Load relevant tables into R
+patients <- read.csv("/Users/wuxiaoyu/Desktop/9419 Master's Essay/mimic-iv-3.1/hosp/patients.csv")
+icustays <- read.csv("/Users/wuxiaoyu/Desktop/9419 Master's Essay/mimic-iv-3.1/icu/icustays.csv")
+diagnoses_icd <- read.csv("/Users/wuxiaoyu/Desktop/9419 Master's Essay/mimic-iv-3.1/hosp/diagnoses_icd.csv")
+labevents <- read.csv("/Users/wuxiaoyu/Desktop/9419 Master's Essay/mimic-iv-3.1/hosp/labevents.csv")
+procedureevents <- read.csv("/Users/wuxiaoyu/Desktop/9419 Master's Essay/mimic-iv-3.1/icu/procedureevents.csv")
+microbiologyevents <- read.csv("/Users/wuxiaoyu/Desktop/9419 Master's Essay/mimic-iv-3.1/hosp/microbiologyevents.csv")
+```
+# Section 2: Define the Cohort
+```{r}
+# Identify Diabetic Patients
+
+## Filter for diabetes-related ICD codes (ICD-9: 250.xx, ICD-10: E08-E13)
+diabetic_patients <- diagnoses_icd %>%
+  filter(
+    str_starts(icd_code, "250") | # ICD-9
+    str_starts(icd_code, "E08") | # ICD-10
+    str_starts(icd_code, "E09") |
+    str_starts(icd_code, "E10") |
+    str_starts(icd_code, "E11") |
+    str_starts(icd_code, "E13")
+  ) %>%
+  select(subject_id) %>%
+  distinct()
+
+## View the first few diabetic patients
+head(diabetic_patients)
+
+# Extract ICU Stays
+
+## Filter ICU stays for diabetic patients
+diabetic_icu_stays <- icustays %>%
+  inner_join(diabetic_patients, by = "subject_id") %>%
+  select(subject_id, stay_id, los) # Keep only relevant columns
+
+## View the first few ICU stays
+head(diabetic_icu_stays)
+
+```
+# Section 3: Define Wound Healing Outcomes
+```{r}
+#Look for Wound Healing Indicators Using labevents, procedureevents, or microbiologyevents:
+## Load the d_labitems table
+
+# labevents
+d_labitems <- read.csv("/Users/wuxiaoyu/Desktop/9419 Master's Essay/mimic-iv-3.1/hosp/d_labitems.csv")
+
+## Extract unique lab test descriptions
+lab_test_list <- d_labitems %>%
+  select(itemid, label) %>%
+  distinct()
+
+## View the first few rows
+head(lab_test_list)
+
+## Save the list to a CSV file for easier inspection
+write.csv(lab_test_list, "lab_test_list.csv", row.names = FALSE)
+
+## Filter lab test descriptions for infection-related terms
+infection_markers <- lab_test_list %>%
+  filter(str_detect(label, regex("infection|WBC|CRP|sepsis|culture", ignore_case = TRUE)))
+
+## View the filtered list
+head(infection_markers)
+
+## Save the filtered list to a CSV file for detailed review
+write.csv(infection_markers, "infection_markers.csv", row.names = FALSE)
+
+## Vector of identified infection marker item IDs
+infection_lab_items <- infection_markers$itemid
+
+## Filter labevents for infection markers
+wound_healing_labs <- labevents %>%
+  filter(itemid %in% infection_lab_items) %>%
+  select(subject_id, hadm_id, itemid, value, valuenum, flag) # Use hadm_id instead of stay_id
+
+## View the first few rows
+head(wound_healing_labs)
+
+## Join labevents with icustays to add stay_id
+labevents_with_stay_id <- labevents %>%
+  inner_join(icustays, by = c("subject_id", "hadm_id")) %>% # Match on subject_id and hadm_id
+  select(subject_id, stay_id, hadm_id, itemid, value, valuenum, flag)
+
+## View the first few rows
+head(labevents_with_stay_id)
+
+## Filter for infection markers
+wound_healing_labs <- labevents_with_stay_id %>%
+  filter(itemid %in% infection_lab_items) %>%
+  select(subject_id, stay_id, itemid, value, valuenum, flag)
+
+## View the first few rows
+head(wound_healing_labs)
+
+# procedureevents
+
+## Load d_icd_procedures table
+d_icd_procedures <- read.csv("/Users/wuxiaoyu/Desktop/9419 Master's Essay/mimic-iv-3.1/hosp/d_icd_procedures.csv")
+
+## View the structure of the table
+head(d_icd_procedures)
+
+## Extract unique ICD procedure descriptions
+procedure_list <- d_icd_procedures %>%
+  select(icd_code, long_title) %>% # Replace `long_title` with the appropriate column name if necessary
+  distinct()
+
+## View the first few rows
+head(procedure_list)
+
+## Save to a CSV file for manual inspection
+write.csv(procedure_list, "procedure_list.csv", row.names = FALSE)
+
+## Filter for wound-related procedures
+wound_icd_procedures <- procedure_list %>%
+  filter(str_detect(long_title, regex("wound|ulcer|debridement|dressing|skin|abscess", ignore_case = TRUE)))
+
+## View the filtered list
+head(wound_icd_procedures)
+
+## Save the filtered list to a CSV file for review
+write.csv(wound_icd_procedures, "wound_icd_procedures.csv", row.names = FALSE)
+
+## Extract ICD codes for wound-related procedures
+wound_icd_codes <- wound_icd_procedures$icd_code
+
+## Filter procedureevents for wound-related procedures
+wound_procedures <- procedureevents %>%
+  filter(itemid %in% wound_icd_codes) %>% # Use `itemid` as the column for ICD codes
+  select(subject_id, stay_id, hadm_id, itemid, starttime, value) # Select relevant columns
+
+## View the first few rows
+head(wound_procedures)
+
+## Save the filtered procedures to a CSV file
+write.csv(wound_procedures, "wound_procedures.csv", row.names = FALSE)
+
+# microbiologyevents
+
+## List unique specimen types
+unique_specimen_types <- microbiologyevents %>%
+  select(spec_type_desc) %>%
+  distinct()
+
+## View the unique specimen types
+head(unique_specimen_types)
+
+## Save to a CSV for manual inspection
+write.csv(unique_specimen_types, "unique_specimen_types.csv", row.names = FALSE)
+
+## Filter for wound-related specimen types
+wound_specimens <- microbiologyevents %>%
+  filter(str_detect(spec_type_desc, regex("wound|tissue|abscess|drainage", ignore_case = TRUE)))
+
+## View the first few rows
+head(wound_specimens)
+
+## Save to a CSV for detailed review
+write.csv(wound_specimens, "wound_specimens.csv", row.names = FALSE)
+
+## List unique tests for wound specimens
+unique_wound_tests <- wound_specimens %>%
+  select(test_name) %>%
+  distinct()
+
+## View the unique wound tests
+head(unique_wound_tests)
+
+## Save to a CSV for manual inspection
+write.csv(unique_wound_tests, "unique_wound_tests.csv", row.names = FALSE)
+
+## Example: Filter for specific wound-related tests
+wound_tests <- wound_specimens %>%
+  filter(str_detect(test_name, regex("culture|bacteria|susceptibility|stain", ignore_case = TRUE))) %>%
+  select(subject_id, hadm_id, spec_type_desc, test_name, org_name, ab_name, comments)
+
+## View the first few rows
+head(wound_tests)
+
+## Save to a CSV for detailed review
+write.csv(wound_tests, "wound_tests.csv", row.names = FALSE)
+
+##  Extract comments and results for review
+wound_results <- wound_tests %>%
+  select(subject_id, hadm_id, test_name, org_name, ab_name, comments)
+
+##  View the first few rows
+head(wound_results)
+
+##  Save to a CSV for detailed review
+write.csv(wound_results, "wound_results.csv", row.names = FALSE)
+```
+# Section 4: Combine Data
+```{r}
+# Combine ICU stay data with wound-related lab, procedure, and microbiology results.
+
+## Merge ICU stays with lab events and procedures
+icu_wound_data <- diabetic_icu_stays %>%
+  left_join(wound_healing_labs, by = c("subject_id", "stay_id")) %>%
+  left_join(wound_procedures, by = c("subject_id", "stay_id")) %>%
+  left_join(wound_results, by = c("subject_id", "hadm_id")) %>%
+  mutate(prolonged_stay = ifelse(los > 7, 1, 0)) # Flag for prolonged ICU stays
+
+## Save the combined dataset
+write.csv(icu_wound_data, "icu_wound_data.csv", row.names = FALSE)
+```
+# Section 5: Preprocessing the Data
+```{r}
+# Step 1: Clean and Consolidate Data
+
+# Identify and Remove Duplicates
+## Check for duplicates
+duplicates <- icu_wound_data %>%
+  filter(duplicated(select(., subject_id, stay_id, hadm_id)))
+
+## Remove duplicates
+icu_wound_data <- icu_wound_data %>%
+  distinct()
+# Consolidate value.x and value.y
+## Convert both columns to numeric
+icu_wound_data <- icu_wound_data %>%
+  mutate(
+    value.x = as.numeric(value.x),
+    value.y = as.numeric(value.y)
+  )
+
+icu_wound_data <- icu_wound_data %>%
+  mutate(
+    value.x = as.numeric(ifelse(value.x %in% c("N/A", ""), NA, value.x)),
+    value.y = as.numeric(ifelse(value.y %in% c("N/A", ""), NA, value.y))
+  )
+
+icu_wound_data <- icu_wound_data %>%
+  mutate(value = coalesce(value.x, value.y))
+# Handle Missing Values
+## Remove rows with missing values in critical columns
+icu_wound_data <- icu_wound_data %>%
+  filter(!is.na(value) & !is.na(los))
+
+## Optionally, impute missing values for `value`
+icu_wound_data$value <- ifelse(is.na(icu_wound_data$value), 
+                               mean(icu_wound_data$value, na.rm = TRUE), 
+                               icu_wound_data$value)
+#  Drop Unnecessary Columns
+icu_wound_data <- icu_wound_data %>%
+  select(subject_id, stay_id, los, value, test_name, org_name, prolonged_stay)
+
+# Summarize and Verify
+## Check the structure of the cleaned data
+str(icu_wound_data)
+
+## View summary statistics
+summary(icu_wound_data)
+
+## Preview the first few rows
+head(icu_wound_data)
+```
+# Section 6: Descriptive Statistics
+```{r}
+# Summarize ICU length of stay
+summary(icu_wound_data$los)
+
+# Summarize infection marker values
+summary(icu_wound_data$value)
+
+# Prolonged stay analysis
+prolonged_summary <- icu_wound_data %>%
+  group_by(prolonged_stay) %>%
+  summarise(
+    count = n(),
+    mean_los = mean(los, na.rm = TRUE),
+    mean_value = mean(value, na.rm = TRUE)
+  )
+print(prolonged_summary)
+
+# Plot histogram of ICU length of stay
+ggplot(icu_wound_data, aes(x = los)) +
+  geom_histogram(binwidth = 1, fill = "blue", color = "black") +
+  labs(title = "Distribution of ICU Stay Duration",
+       x = "Length of Stay (days)", y = "Frequency")
+
+# Boxplot of infection marker values by prolonged stay
+ggplot(icu_wound_data, aes(x = as.factor(prolonged_stay), y = value)) +
+  geom_boxplot(fill = "orange") +
+  labs(title = "Infection Marker Values by Prolonged Stay",
+       x = "Prolonged Stay (0 = No, 1 = Yes)", y = "Infection Marker Value")
+```
+# Section 7: Regression Analysis
+```{r}
+# Linear regression: Predict value based on ICU stay duration and prolonged stay
+reg_model <- lm(value ~ los + prolonged_stay, data = icu_wound_data)
+summary(reg_model)
+
+# Visualize regression results
+ggplot(icu_wound_data, aes(x = los, y = value)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", color = "red") +
+  labs(title = "Regression: ICU Stay Duration vs Infection Marker Value",
+       x = "Length of ICU Stay (days)", y = "Infection Marker Value")
+```
+# Section 8: Kaplan-Meier Survival Analysis
+```{r}
+# Simulate healing time based on `los` (replace this with actual healing data if available)
+icu_wound_data <- icu_wound_data %>%
+  mutate(healing_time = los + sample(1:5, n(), replace = TRUE), # Simulated healing time
+         healed = ifelse(value < 5, 1, 0)) # Assume `value < 5` indicates healing
+
+# Kaplan-Meier survival analysis
+library(survival)
+
+km_fit <- survfit(Surv(healing_time, healed) ~ prolonged_stay, data = icu_wound_data)
+
+# Plot Kaplan-Meier survival curves
+plot(km_fit, col = c("blue", "red"), lwd = 2,
+     xlab = "Time to Wound Healing (days)",
+     ylab = "Survival Probability",
+     main = "Kaplan-Meier Curve: Time to Wound Healing")
+legend("topright", legend = c("Short ICU Stay", "Prolonged ICU Stay"),
+       col = c("blue", "red"), lwd = 2)
+```
+# Section 9: Random Forest Feature Importance
+```{r}
+# Ensure required library is installed
+if (!require(randomForest)) install.packages("randomForest")
+library(randomForest)
+
+# Prepare data for random forest (remove NAs and select relevant variables)
+rf_data <- icu_wound_data %>%
+  select(value, los, prolonged_stay) %>%
+  na.omit()
+
+# Train random forest model
+rf_model <- randomForest(
+  value ~ .,  # Predict `value` using other variables
+  data = rf_data,
+  importance = TRUE,
+  ntree = 500
+)
+
+# View feature importance
+importance(rf_model)
+
+# Plot feature importance
+varImpPlot(rf_model)
+```
+# Section 10: Identifying Key Predictors of Impaired Healing
+```{r}
+# Check for the minimum and maximum values of the value column.
+icu_wound_data %>% 
+  summarise(
+    min_value = min(value, na.rm = TRUE),
+    max_value = max(value, na.rm = TRUE)
+  )
+# min_value: 0 max_value: 961
+# Create a binary outcome for impaired healing using a threshold of 100
+icu_wound_data <- icu_wound_data %>%
+  mutate(impaired_healing = ifelse(value >= 100, 1, 0))
+
+# Check the distribution of the new outcome variable
+table(icu_wound_data$impaired_healing)
+
+# Fit a logistic regression model to assess predictors of impaired healing
+logit_model <- glm(impaired_healing ~ los + prolonged_stay, 
+                   data = icu_wound_data, 
+                   family = binomial)
+
+# Display the summary of the model to review coefficient estimates and significance levels
+summary(logit_model)
+
+# Calculate odds ratios and 95% confidence intervals for the predictors
+exp_coef <- exp(coef(logit_model))
+conf_int <- exp(confint(logit_model))
+odds_ratios <- data.frame(Estimate = exp_coef, conf_int)
+print(odds_ratios)
+```
+# Section 11: Cox Proportional Hazards Model for Time to Healing
+```{r}
+# Ensure the survival library is loaded
+library(survival)
+
+# Fit the Cox proportional hazards model using healing time and event indicator (healed)
+cox_model <- coxph(Surv(healing_time, healed) ~ los + prolonged_stay, 
+                   data = icu_wound_data)
+
+# Summarize the Cox model to review hazard ratios (HR) and p-values
+summary(cox_model)
+```
