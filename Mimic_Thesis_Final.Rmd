@@ -58,7 +58,20 @@ d_icd_procedures    <- read_csv(d_icd_procedures_file)
 # Section 2: Define the Diabetic Cohort
 # -----------------------------------------------------------
 ```{r}
-# Filter for diabetes-related ICD codes
+library(dplyr)
+library(stringr)
+
+# -----------------------------------------------------------
+# Step 1: Filter Adult Patients (Aged ≥18 Years)
+# -----------------------------------------------------------
+adult_patients <- patients %>%
+  filter(anchor_age >= 18) %>%
+  select(subject_id, anchor_age) %>%
+  distinct()
+
+# -----------------------------------------------------------
+# Step 2: Identify Diabetic Patients Using ICD Codes
+# -----------------------------------------------------------
 diabetic_patients <- diagnoses_icd %>%
   filter(str_starts(icd_code, "250") |  # ICD-9: 250.xx
          str_starts(icd_code, "E08") |  # ICD-10: E08
@@ -66,17 +79,66 @@ diabetic_patients <- diagnoses_icd %>%
          str_starts(icd_code, "E10") |
          str_starts(icd_code, "E11") |
          str_starts(icd_code, "E13")) %>%
-  select(subject_id) %>%
+  # Remove subject_id to avoid duplicating it in the join with icustays
+  select(hadm_id) %>%
   distinct()
 
-# Preview diabetic patients
-head(diabetic_patients)
-
-# Extract ICU stays for diabetic patients and keep key columns
+# -----------------------------------------------------------
+# Step 3: Extract ICU Stays for Diabetic Patients
+# -----------------------------------------------------------
 diabetic_icu_stays <- icustays %>%
-  inner_join(diabetic_patients, by = "subject_id") %>%
-  select(subject_id, stay_id, los)
-head(diabetic_icu_stays)
+  inner_join(diabetic_patients, by = "hadm_id") %>%  # Merge using hadm_id
+  filter(los >= 0.5) %>%  # Adjust filter to ≥12 hours (0.5 days)
+  select(subject_id, hadm_id, stay_id, los) %>%
+  distinct()
+
+# -----------------------------------------------------------
+# Step 4: Identify Wound-Related Diagnoses and Procedures
+# -----------------------------------------------------------
+wound_icd_procedures <- d_icd_procedures %>%
+  filter(str_detect(long_title, regex("wound|ulcer|debridement|dressing|skin|abscess", ignore_case = TRUE))) %>%
+  select(icd_code) %>%
+  distinct()
+
+wound_procedures <- procedureevents %>%
+  filter(itemid %in% wound_icd_procedures$icd_code) %>%
+  select(hadm_id, itemid, starttime) %>%  
+  distinct()
+
+# -----------------------------------------------------------
+# Step 5: Identify Infection-Related Laboratory Markers
+# -----------------------------------------------------------
+infection_markers <- d_labitems %>%
+  filter(str_detect(label, regex("infection|WBC|CRP|sepsis|culture", ignore_case = TRUE))) %>%
+  select(itemid) %>%
+  distinct()
+
+infection_labs <- labevents %>%
+  filter(itemid %in% infection_markers$itemid) %>%
+  select(hadm_id, itemid, value, valuenum, flag) %>%
+  distinct()
+
+# -----------------------------------------------------------
+# Step 6: Merge Data and Apply Exclusion Criteria
+# -----------------------------------------------------------
+filtered_patients <- diabetic_icu_stays %>%
+  left_join(wound_procedures, by = "hadm_id") %>%  # LEFT JOIN to include all ICU stays
+  left_join(infection_labs, by = "hadm_id") %>%       # LEFT JOIN for infection labs
+  filter(!is.na(los)) %>%  # Ensure ICU LOS is recorded
+  distinct()
+
+# -----------------------------------------------------------
+# Step 7: Count Final Filtered Cohort
+# -----------------------------------------------------------
+num_filtered_patients <- filtered_patients %>%
+  distinct(hadm_id) %>%
+  count()
+
+# Print the final cohort count
+print(num_filtered_patients)
+
+# Preview the final filtered dataset
+head(filtered_patients)
 ```
 # -----------------------------------------------------------
 # Section 3: Define Wound Healing Outcomes
@@ -161,18 +223,30 @@ head(wound_results)
 # Section 4: Combine Data into a Unified Dataset
 # -----------------------------------------------------------
 ```{r}
-# Merge diabetic ICU stay data with wound-related labs, procedures, and microbiology results
 icu_wound_data <- diabetic_icu_stays %>%
+  # Join wound-related lab results using subject_id and stay_id
   left_join(wound_healing_labs, by = c("subject_id", "stay_id")) %>%
+  
+  # Join wound-related procedures using subject_id and stay_id.
+  # Note: This join creates duplicate 'hadm_id' columns.
   left_join(wound_procedures, by = c("subject_id", "stay_id")) %>%
+  
+  # Restore the original hadm_id by renaming and dropping the duplicate.
+  # Here, we assume that 'hadm_id.x' (from diabetic_icu_stays) is the desired column.
+  rename(hadm_id = hadm_id.x) %>%
+  select(-hadm_id.y) %>%
+  
+  # Join wound-related microbiology results using subject_id and hadm_id.
   left_join(wound_results, by = c("subject_id", "hadm_id")) %>%
-  mutate(prolonged_stay = if_else(los > 7, 1, 0))  # Flag for prolonged ICU stay (>7 days)
+  
+  # Create a flag for prolonged ICU stay (>7 days)
+  mutate(prolonged_stay = if_else(los > 7, 1, 0))
 
-# Check and fix any empty column names by replacing them with a placeholder ("unknown")
+# Check for any empty column names and replace them with a placeholder ("unknown")
 icu_wound_data <- icu_wound_data %>%
-  rename_with(~ ifelse(. == "", "unknown", .))
+  rename_with(~ if_else(. == "", "unknown", .))
 
-# Save the combined dataset (optional)
+# Optionally, save the combined dataset to a CSV file
 write_csv(icu_wound_data, "icu_wound_data.csv")
 ```
 
@@ -180,30 +254,47 @@ write_csv(icu_wound_data, "icu_wound_data.csv")
 # Section 5: Data Preprocessing and Cleaning
 # -----------------------------------------------------------
 ```{r}
-# (A) Remove Duplicates
+library(dplyr)
+# (A) Remove duplicate rows
 icu_wound_data <- icu_wound_data %>%
   distinct()
 
 # (B) Consolidate and Clean Value Columns
-# Since there is no column named "value" (only value.x and value.y exist),
-# we convert those to numeric and then coalesce them into a new "value" column.
-icu_wound_data <- icu_wound_data %>%
-  mutate(across(c(value.x, value.y), ~ as.numeric(if_else(. %in% c("N/A", ""), NA_character_, as.character(.))))) %>%
-  mutate(value = coalesce(value.x, value.y))
+# Check for the existence of 'value.x' and 'value.y'. If they exist, convert and coalesce them.
+if (all(c("value.x", "value.y") %in% names(icu_wound_data))) {
+  icu_wound_data <- icu_wound_data %>%
+    mutate(across(c(value.x, value.y),
+                  ~ as.numeric(if_else(. %in% c("N/A", ""),
+                                       NA_character_,
+                                       as.character(.))))) %>%
+    mutate(value = coalesce(value.x, value.y))
+} else if ("value" %in% names(icu_wound_data)) {
+  # If there is already a column named "value", convert it to numeric
+  icu_wound_data <- icu_wound_data %>%
+    mutate(value = as.numeric(if_else(value %in% c("N/A", ""),
+                                      NA_character_,
+                                      as.character(value))))
+} else {
+  # If none of the expected value columns exist, create a placeholder column
+  warning("No value columns found in icu_wound_data. Creating a placeholder 'value' column as NA.")
+  icu_wound_data <- icu_wound_data %>%
+    mutate(value = NA_real_)
+}
 
 # (C) Handle Missing Values in Critical Columns
+# Remove rows where 'value' or 'los' is missing.
 icu_wound_data <- icu_wound_data %>%
-  filter(!is.na(value), !is.na(los))
-  
-# Optionally, impute any remaining missing 'value' (here we use the mean)
+  filter(!is.na(value) & !is.na(los))
+
+# Optionally, impute any remaining missing 'value' with the mean (this might be redundant after filtering)
 icu_wound_data <- icu_wound_data %>%
   mutate(value = if_else(is.na(value), mean(value, na.rm = TRUE), value))
 
-# (D) Select Only the Necessary Columns
+# (D) Select only the necessary columns for further analysis
 icu_wound_data <- icu_wound_data %>%
   select(subject_id, stay_id, los, value, test_name, org_name, prolonged_stay)
 
-# Verify data structure and summary
+# Verify the data structure and summary statistics
 str(icu_wound_data)
 summary(icu_wound_data)
 head(icu_wound_data)
@@ -213,34 +304,42 @@ head(icu_wound_data)
 # Section 6: Descriptive Statistics and Visualization
 # -----------------------------------------------------------
 ```{r}
-# Summary statistics for ICU length of stay and infection marker values
+# Print summary statistics for ICU length of stay and infection marker values
 summary(icu_wound_data$los)
 summary(icu_wound_data$value)
 
-# Grouped summary by prolonged stay
+# Create a grouped summary by prolonged ICU stay status (0 = No, 1 = Yes)
 prolonged_summary <- icu_wound_data %>%
   group_by(prolonged_stay) %>%
   summarise(
-    count = n(),
-    mean_los = mean(los, na.rm = TRUE),
-    mean_value = mean(value, na.rm = TRUE),
-    .groups = "drop"
+    count = n(),                         # Number of observations
+    mean_los = mean(los, na.rm = TRUE),    # Mean length of stay
+    mean_value = mean(value, na.rm = TRUE),# Mean infection marker value
+    .groups = "drop"                      # Ungroup after summarising
   )
 print(prolonged_summary)
 
-# Plot histogram of ICU length of stay
+# -------------------------------
+# Visualization
+# -------------------------------
+
+# Histogram of ICU Length of Stay
 ggplot(icu_wound_data, aes(x = los)) +
   geom_histogram(binwidth = 1, fill = "blue", color = "black") +
-  labs(title = "Distribution of ICU Stay Duration",
-       x = "Length of Stay (days)",
-       y = "Frequency")
+  labs(
+    title = "Distribution of ICU Stay Duration",
+    x = "Length of Stay (days)",
+    y = "Frequency"
+  )
 
-# Boxplot of infection marker values by prolonged stay status
+# Boxplot of Infection Marker Values by Prolonged ICU Stay Status
 ggplot(icu_wound_data, aes(x = factor(prolonged_stay), y = value)) +
   geom_boxplot(fill = "orange") +
-  labs(title = "Infection Marker Values by Prolonged ICU Stay",
-       x = "Prolonged Stay (0 = No, 1 = Yes)",
-       y = "Infection Marker Value")
+  labs(
+    title = "Infection Marker Values by Prolonged ICU Stay",
+    x = "Prolonged Stay (0 = No, 1 = Yes)",
+    y = "Infection Marker Value"
+  )
 ```
 
 # -----------------------------------------------------------
@@ -309,7 +408,7 @@ varImpPlot(rf_model)
 # -----------------------------------------------------------
 # Section 10: Identifying Key Predictors of Impaired Healing
 # -----------------------------------------------------------
-```{r section10, echo=TRUE, message=FALSE}
+```{r}
 # Examine the range of infection marker values
 icu_wound_data %>% 
   summarise(
@@ -348,7 +447,7 @@ print(odds_ratios)
 # -----------------------------------------------------------
 # Section 11: Cox Proportional Hazards Model for Time to Healing
 # -----------------------------------------------------------
-```{r section11, echo=TRUE, message=FALSE}
+```{r}
 # Ensure the survival package is loaded
 library(survival)
 
@@ -359,3 +458,14 @@ cox_model <- coxph(Surv(healing_time, healed) ~ los + prolonged_stay,
 # Summarize the Cox model to review hazard ratios (HR) and p-values
 summary(cox_model)
 ```
+
+```{r}
+# Count the total number of unique patients in the dataset
+total_unique_patients <- patients %>%
+  distinct(subject_id) %>%
+  count()
+
+# Print the result
+print(total_unique_patients)
+```
+
